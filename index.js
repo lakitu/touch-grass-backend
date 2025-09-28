@@ -93,11 +93,11 @@ app.post("/auth/login", async (req, res) => {
 
 
 // lookups
-app.get("/interests", async (_req, _res) => {
+app.get("/interests", async (_req, res) => {
     const { rows } = await db.query(
         `SELECT i.iid, i.interest,
             COALESCE(ui.cnt,0)::int as USER_COUNT,
-            COALESCE(ei.cnt,0)::int as EVENT_COUNT,
+            COALESCE(ei.cnt,0)::int as EVENT_COUNT
         FROM interests i 
         LEFT JOIN (
             SELECT iid, count(*)::int as cnt from userinterests GROUP BY iid
@@ -108,9 +108,10 @@ app.get("/interests", async (_req, _res) => {
         ORDER BY i.interest
         `
     )
+    res.json(rows);
 })
 
-app.get("/tags", async(_req, _res) => {
+app.get("/tags", async(_req, res) => {
     const { rows } = await db.query(
         `SELECT t.tid, t.tag,
             COALESCE(ut.cnt, 0)::int AS user_count,
@@ -180,7 +181,7 @@ class ProfileSetters {
             [first ?? null, last ?? null, uid]
         );
     }
-    static async clean(arr) {
+    static clean(arr) {
         const cleaned = arr
             .map(s => String(s).trim())
             .filter(Boolean); // removes falsey values from the array
@@ -190,18 +191,24 @@ class ProfileSetters {
         await client.query(`DELETE FROM userinterests WHERE uid = $1`, [uid]);
 
         for (const interest of interests) {
-            const { rows } = await client.query(
-               `INSERT INTO interests (interest)
-               VALUES ($1)
-               ON CONFLICT (interest) DO UPDATE SET interest = EXCLUDED.interest
-               RETURNING iid`,
+            // First, try to find existing interest
+            let { rows } = await client.query(
+                `SELECT iid FROM interests WHERE interest = $1`,
                 [interest]
             );
-            if (rows.length === 0) {
-                return res.status(500).json({error: "Something went wrong when getting the interest"})
+            
+            let iid;
+            if (rows.length > 0) {
+                iid = rows[0].iid;
+            } else {
+                // Insert new interest
+                const result = await client.query(
+                    `INSERT INTO interests (interest) VALUES ($1) RETURNING iid`,
+                    [interest]
+                );
+                iid = result.rows[0].iid;
             }
-
-            const iid = rows[0].iid;
+            
             await client.query(
                 `INSERT INTO userinterests (uid, iid)
                  VALUES ($1, $2)
@@ -228,9 +235,10 @@ app.put("/profile", auth, async (req,res) => {
             await ProfileSetters.update_name(client, uid, first, last);
         }
         if (interests !== undefined) {
-            const names = ProfileSetters.clean(interests) ;
+            const names = ProfileSetters.clean(interests);
             await ProfileSetters.update_interests(client, uid, names);
         }
+        await client.query("COMMIT");
         return res.json({uid, status: "success"});
     } catch(e) {
         await client.query("ROLLBACK");
